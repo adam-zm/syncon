@@ -1,0 +1,9 @@
+[workspace]
+members = [
+    "crates/syncon-proto",
+    "crates/syncon-crypto",
+    "crates/syncon-session",
+    "crates/syncon-discovery",
+    "linux/syncon-linkd",
+]
+resolver = "2"

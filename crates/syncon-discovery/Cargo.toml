@@ -1,0 +1,12 @@
+[package]
+name = "syncon-discovery"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syncon-proto = { path = "../syncon-proto" }
+mdns-sd = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+flume = "0.11"

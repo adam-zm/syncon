@@ -1,0 +1,17 @@
+[package]
+name = "syncon-linkd"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "syncon-linkd"
+path = "src/main.rs"
+
+[dependencies]
+syncon-session = { path = "../../crates/syncon-session" }
+syncon-discovery = { path = "../../crates/syncon-discovery" }
+syncon-crypto = { path = "../../crates/syncon-crypto" }
+syncon-proto = { path = "../../crates/syncon-proto" }
+tokio = { version = "1", features = ["full", "rt-multi-thread"] }
+clap = { version = "4", features = ["derive"] }
+hex = "0.4"

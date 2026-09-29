@@ -1,0 +1,9 @@
+[package]
+name = "syncon-crypto"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syncon-proto = { path = "../syncon-proto" }
+ring = "0.17"
+hex = "0.4"

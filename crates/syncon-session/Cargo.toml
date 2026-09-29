@@ -1,0 +1,11 @@
+[package]
+name = "syncon-session"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+syncon-proto = { path = "../syncon-proto" }
+syncon-crypto = { path = "../syncon-crypto" }
+syncon-discovery = { path = "../syncon-discovery" }
+tokio = { version = "1", features = ["full"] }
+rand = "0.8"
