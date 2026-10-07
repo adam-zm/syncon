@@ -7,3 +7,7 @@ edition = "2021"
 syncon-proto = { path = "../syncon-proto" }
 ring = "0.17"
 hex = "0.4"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+rand = "0.8"
+rcgen = { version = "0.13", default-features = false, features = ["ring"] }
+rustls-pki-types = "1"

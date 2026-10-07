@@ -4,9 +4,13 @@
 
 pub mod connection;
 pub mod supervisor;
+pub mod tls;
 
 // Re-export key types for convenience.
-pub use connection::{ConnectionConfig, REALTIME_PORT, BULK_PORT};
+pub use connection::{
+    BulkLink, Link, LinkError, Message, Transport, TransportConfig, BULK_PORT, REALTIME_PORT,
+};
+pub use tls::Trust;
 pub use supervisor::{
     BackoffConfig, PeerSession, Supervisor, SupervisorCommand, SupervisorConfig, SupervisorEvent,
     SupervisorState,
