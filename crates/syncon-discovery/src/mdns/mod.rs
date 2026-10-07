@@ -27,7 +27,7 @@ pub const DEFAULT_REALTIME_PORT: u16 = 47920;
 pub const DEFAULT_BULK_PORT: u16 = 47921;
 
 /// mDNS service type for Syncon.
-pub const SERVICE_TYPE: &str = "_link._udp.local";
+pub const SERVICE_TYPE: &str = "_link._udp.local.";
 
 /// Maximum display name length in bytes.
 pub const MAX_NAME_LEN: usize = 32;

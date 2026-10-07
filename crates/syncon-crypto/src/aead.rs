@@ -133,6 +133,10 @@ impl InnerAeadKey {
     /// This ensures both sides use different nonces even with the same class and seq,
     /// preventing nonce reuse.
     pub fn build_nonce(&self, class: u8, seq: u64) -> [u8; NONCE_LEN] {
+        self.nonce_for_direction(self.our_direction, class, seq)
+    }
+
+    fn nonce_for_direction(&self, direction: u8, class: u8, seq: u64) -> [u8; NONCE_LEN] {
         let mut nonce = [0u8; NONCE_LEN];
 
         // class (1 byte)
@@ -142,7 +146,7 @@ impl InnerAeadKey {
         nonce[1..9].copy_from_slice(&seq.to_le_bytes());
 
         // direction (1 byte)
-        nonce[9] = self.our_direction;
+        nonce[9] = direction;
 
         // padding (2 bytes, must be 0)
         nonce[10..12].copy_from_slice(&[0u8; 2]);
@@ -193,7 +197,8 @@ impl InnerAeadKey {
     ///
     /// The decrypted plaintext, or `None` if decryption fails (wrong key, nonce reuse, etc.).
     pub fn decrypt(&self, class: u8, seq: u64, ciphertext: &[u8]) -> Option<Vec<u8>> {
-        let nonce = self.build_nonce(class, seq);
+        // Incoming messages were sealed with the peer's direction bit.
+        let nonce = self.nonce_for_direction(self.our_direction ^ 1, class, seq);
 
         let unbound_key = UnboundKey::new(&CHACHA20_POLY1305, &self.key_bytes).unwrap();
         let less_safe_key = LessSafeKey::new(unbound_key);
@@ -275,26 +280,13 @@ fn hkdf_derive(ikm: &[u8], salt_bytes: &[u8], info: &[u8]) -> [u8; AEAD_KEY_LEN]
     key
 }
 
-/// X25519 key exchange helper.
-///
-/// Performs X25519 key exchange given a private key and peer's public key.
-/// Note: This consumes the private key (takes it by value).
-/// Returns None on failure, otherwise the 32-byte shared secret.
+/// X25519 helper for the Hello ephemeral. Returns `None` for a low-order peer key.
 pub fn x25519_shared(
-    private_key: ring::agreement::EphemeralPrivateKey,
+    private_key: x25519_dalek::EphemeralSecret,
     peer_public: &[u8; X25519_PUB_LEN],
 ) -> Option<[u8; X25519_SHARED_LEN]> {
-    use ring::agreement::{self, UnparsedPublicKey};
-
-    let peer_pub = UnparsedPublicKey::new(&agreement::X25519, peer_public);
-    // agree_ephemeral consumes the private key and requires a KDF function
-    // We use a simple KDF that just copies the shared secret
-    agreement::agree_ephemeral(private_key, &peer_pub, |secret| {
-        let mut result = [0u8; X25519_SHARED_LEN];
-        result.copy_from_slice(secret);
-        result
-    })
-    .ok()
+    let shared = private_key.diffie_hellman(&x25519_dalek::PublicKey::from(*peer_public));
+    shared.was_contributory().then(|| shared.to_bytes())
 }
 
 /// Validates that a nonce is unique for a given key.
@@ -362,11 +354,12 @@ mod tests {
         let class = 2; // Clipboard
         let seq = 1;
 
-        let ciphertext = key.encrypt(class, seq, plaintext);
-        let decrypted = key.decrypt(class, seq, &ciphertext);
+        let peer = InnerAeadKey { key_bytes: key.key_bytes, our_direction: 1 };
 
-        assert!(decrypted.is_some());
-        assert_eq!(decrypted.unwrap(), plaintext);
+        let ciphertext = key.encrypt(class, seq, plaintext);
+        assert_eq!(peer.decrypt(class, seq, &ciphertext).unwrap(), plaintext);
+        // Same side cannot open its own message: directions differ by design.
+        assert!(key.decrypt(class, seq, &ciphertext).is_none());
     }
 
     #[test]

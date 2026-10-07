@@ -57,7 +57,7 @@ Later, optional, off by default: an iroh endpoint as a third candidate for away-
 
 Used from M1 onward. Specified now so M0 addresses and fingerprints match.
 
-**mDNS service type:** `_link._udp.local`.
+**mDNS service type:** `_link._udp.local.`.
 
 TXT records, all ASCII:
 

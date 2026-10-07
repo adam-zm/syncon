@@ -8,8 +8,10 @@
 //! The public identity is the 32-byte Ed25519 public key plus the 32-byte X25519 public key.
 //! The fingerprint is the first 16 bytes of SHA-256(sign_pub), as lowercase hex.
 
+use x25519_dalek::{PublicKey as X25519Public, StaticSecret};
+
 use ring::{
-    agreement, digest,
+    digest,
     rand::SystemRandom,
     signature::{self, Ed25519KeyPair, KeyPair as _},
 };
@@ -28,17 +30,14 @@ pub const PUBLIC_IDENTITY_LEN: usize = ED25519_PUB_LEN + X25519_PUB_LEN;
 
 /// The complete identity bundle for a device.
 ///
-/// This contains all cryptographic material needed for a device to authenticate
-/// and establish secure sessions with peers.
-#[derive(Debug)]
+/// Both secrets are persistable (see [`Identity::to_secret_bytes`]) and the DH
+/// key can be used any number of times.
 pub struct Identity {
-    /// Ed25519 keypair for signing and certificate generation.
-    pub sign_keypair: Ed25519KeyPair,
+    sign_keypair: Ed25519KeyPair,
+    sign_pkcs8: Vec<u8>,
+    dh_secret: StaticSecret,
 
-    /// X25519 static keypair for inner AEAD key derivation.
-    pub dh_static_keypair: agreement::EphemeralPrivateKey,
-
-    /// The self-signed certificate bytes (DER-encoded, rustls-compatible).
+    /// Self-signed X.509 certificate (DER) over the Ed25519 key.
     pub certificate: Vec<u8>,
 
     /// Cached Ed25519 public key bytes.
@@ -51,47 +50,73 @@ pub struct Identity {
     pub fingerprint: [u8; FINGERPRINT_LEN],
 }
 
+impl std::fmt::Debug for Identity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Identity")
+            .field("fingerprint", &hex::encode(self.fingerprint))
+            .finish_non_exhaustive()
+    }
+}
+
+/// Length of the X25519 static secret in bytes.
+const DH_SECRET_LEN: usize = 32;
+
 impl Identity {
     /// Generates a new random identity bundle.
-    ///
-    /// This creates:
-    /// - A new Ed25519 keypair for signing
-    /// - A new X25519 static keypair for DH
-    /// - A self-signed certificate
-    /// - The fingerprint from the Ed25519 public key
     ///
     /// Returns `None` if the system random number generator fails.
     pub fn generate() -> Option<Self> {
         let rng = SystemRandom::new();
+        let pkcs8 = signature::Ed25519KeyPair::generate_pkcs8(&rng).ok()?;
+        let mut dh = [0u8; DH_SECRET_LEN];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut dh);
+        Self::from_parts(pkcs8.as_ref().to_vec(), dh)
+    }
 
-        // Generate Ed25519 keypair for signing
-        let sign_seed = signature::Ed25519KeyPair::generate_pkcs8(&rng).ok()?;
-        let sign_keypair = signature::Ed25519KeyPair::from_pkcs8(sign_seed.as_ref()).ok()?;
-        let sign_pub = sign_keypair.public_key().as_ref();
-        let mut sign_pub_array = [0u8; ED25519_PUB_LEN];
-        sign_pub_array.copy_from_slice(sign_pub);
+    fn from_parts(sign_pkcs8: Vec<u8>, dh: [u8; DH_SECRET_LEN]) -> Option<Self> {
+        let sign_keypair = Ed25519KeyPair::from_pkcs8(&sign_pkcs8).ok()?;
+        let mut sign_pub = [0u8; ED25519_PUB_LEN];
+        sign_pub.copy_from_slice(sign_keypair.public_key().as_ref());
 
-        // Generate X25519 static keypair for inner AEAD
-        let dh_static_priv =
-            agreement::EphemeralPrivateKey::generate(&agreement::X25519, &rng).ok()?;
-        let dh_pub = dh_static_priv.compute_public_key().ok()?;
-        let mut dh_pub_array = [0u8; X25519_PUB_LEN];
-        dh_pub_array.copy_from_slice(dh_pub.as_ref());
-
-        // Compute fingerprint: first 16 bytes of SHA-256(sign_pub)
-        let fingerprint = compute_fingerprint(sign_pub);
-
-        // Generate self-signed certificate
-        let certificate = generate_self_signed_cert(&sign_keypair, sign_pub, &dh_pub_array)?;
+        let dh_secret = StaticSecret::from(dh);
+        let dh_pub = X25519Public::from(&dh_secret).to_bytes();
+        let fingerprint = compute_fingerprint(&sign_pub);
+        let certificate = generate_self_signed_cert(&sign_pkcs8)?;
 
         Some(Self {
             sign_keypair,
-            dh_static_keypair: dh_static_priv,
+            sign_pkcs8,
+            dh_secret,
             certificate,
-            sign_pub: sign_pub_array,
-            dh_pub: dh_pub_array,
+            sign_pub,
+            dh_pub,
             fingerprint,
         })
+    }
+
+    /// Serializes the secret material (`u16 pkcs8_len || pkcs8 || dh_secret`).
+    /// Callers must store this with mode 0600.
+    pub fn to_secret_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(2 + self.sign_pkcs8.len() + DH_SECRET_LEN);
+        out.extend_from_slice(&(self.sign_pkcs8.len() as u16).to_le_bytes());
+        out.extend_from_slice(&self.sign_pkcs8);
+        out.extend_from_slice(&self.dh_secret.to_bytes());
+        out
+    }
+
+    /// Restores an identity from [`Identity::to_secret_bytes`] output.
+    pub fn from_secret_bytes(bytes: &[u8]) -> Option<Self> {
+        let len = u16::from_le_bytes(bytes.get(..2)?.try_into().ok()?) as usize;
+        if bytes.len() != 2 + len + DH_SECRET_LEN {
+            return None;
+        }
+        let dh: [u8; DH_SECRET_LEN] = bytes[2 + len..].try_into().ok()?;
+        Self::from_parts(bytes[2..2 + len].to_vec(), dh)
+    }
+
+    /// PKCS#8 DER of the Ed25519 key, for the TLS stack.
+    pub fn sign_pkcs8(&self) -> &[u8] {
+        &self.sign_pkcs8
     }
 
     /// Returns the public identity (Ed25519 pub + X25519 pub) as a byte array.
@@ -122,21 +147,13 @@ impl Identity {
         &self.certificate
     }
 
-    /// Performs X25519 key exchange with a peer's public key.
-    ///
-    /// Returns the shared secret (32 bytes).
-    /// Note: This consumes the local private key to ensure it's only used once.
-    pub fn into_dh_static_shared_secret(
-        self,
+    /// X25519(local static, peer static). Returns `None` for a low-order peer key.
+    pub fn dh_static_shared_secret(
+        &self,
         peer_dh_pub: &[u8; X25519_PUB_LEN],
     ) -> Option<[u8; X25519_PUB_LEN]> {
-        let peer_pub = agreement::UnparsedPublicKey::new(&agreement::X25519, peer_dh_pub);
-        agreement::agree_ephemeral(self.dh_static_keypair, &peer_pub, |secret| {
-            let mut result = [0u8; X25519_PUB_LEN];
-            result.copy_from_slice(secret);
-            result
-        })
-        .ok()
+        let shared = self.dh_secret.diffie_hellman(&X25519Public::from(*peer_dh_pub));
+        shared.was_contributory().then(|| shared.to_bytes())
     }
 
     /// Signs a message with the Ed25519 key.
@@ -171,40 +188,14 @@ pub fn compute_fingerprint_hex(sign_pub: &[u8]) -> String {
     hex::encode(fingerprint)
 }
 
-/// Generates a self-signed Ed25519 certificate.
-///
-/// The certificate is rustls-compatible and contains the device's Ed25519 public key.
-/// For v1, no DNS/SAN is used for trust - verification is done by comparing the
-/// certificate's subject public key against the pinned Ed25519 public key.
-///
-/// Note: This is a simplified certificate generation. In production, you'd want
-/// to use a proper certificate builder, but for M0 this minimal approach is fine.
-fn generate_self_signed_cert(
-    keypair: &Ed25519KeyPair,
-    sign_pub: &[u8],
-    _dh_pub: &[u8; X25519_PUB_LEN],
-) -> Option<Vec<u8>> {
-    // For M0, we use a minimal self-signed certificate.
-    // In practice, this would use rcgen or similar, but ring doesn't provide
-    // certificate building. We'll use a simple approach: sign the public key
-    // directly as the "certificate".
-    //
-    // Actually, for proper rustls compatibility, we need a real certificate.
-    // Since ring doesn't provide certificate generation, and we're in no_std-friendly
-    // territory, we'll use a simple signature over the public key as a stand-in.
-    //
-    // For a real implementation, you'd use rcgen::Certificate or similar.
-    // But to keep dependencies minimal, we sign the public key bytes.
-
-    let signature = keypair.sign(sign_pub);
-
-    // Certificate format for M0: [public_key || signature]
-    // This is a simplified format. Real implementation would use DER-encoded X.509.
-    let mut cert = Vec::with_capacity(sign_pub.len() + signature.as_ref().len());
-    cert.extend_from_slice(sign_pub);
-    cert.extend_from_slice(signature.as_ref());
-
-    Some(cert)
+/// Generates a self-signed X.509 Ed25519 certificate. SAN/DNS carry no trust;
+/// peers compare the subject public key against the pin.
+fn generate_self_signed_cert(pkcs8: &[u8]) -> Option<Vec<u8>> {
+    let der = rustls_pki_types::PrivatePkcs8KeyDer::from(pkcs8);
+    let key = rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&der, &rcgen::PKCS_ED25519).ok()?;
+    let params = rcgen::CertificateParams::new(vec!["syncon".to_string()]).ok()?;
+    let cert = params.self_signed(&key).ok()?;
+    Some(cert.der().to_vec())
 }
 
 /// Parses a public identity from its components.
@@ -309,17 +300,24 @@ mod tests {
         let alice = Identity::generate().unwrap();
         let bob = Identity::generate().unwrap();
 
-        // Extract public keys before consuming identities
-        let alice_dh_pub = alice.dh_pub;
-        let bob_dh_pub = bob.dh_pub;
-
-        let alice_shared = alice.into_dh_static_shared_secret(&bob_dh_pub);
-        let bob_shared = bob.into_dh_static_shared_secret(&alice_dh_pub);
+        let alice_shared = alice.dh_static_shared_secret(&bob.dh_pub);
+        let bob_shared = bob.dh_static_shared_secret(&alice.dh_pub);
 
         assert!(alice_shared.is_some());
         assert!(bob_shared.is_some());
 
         // Shared secrets should be equal
         assert_eq!(alice_shared.unwrap(), bob_shared.unwrap());
+    }
+
+    #[test]
+    fn test_secret_roundtrip_and_cert() {
+        let a = Identity::generate().unwrap();
+        let b = Identity::from_secret_bytes(&a.to_secret_bytes()).unwrap();
+        assert_eq!(a.sign_pub, b.sign_pub);
+        assert_eq!(a.dh_pub, b.dh_pub);
+        assert!(Identity::from_secret_bytes(&[0u8; 5]).is_none());
+        // Ed25519 SPKI sits inside the certificate.
+        assert!(a.certificate.windows(32).any(|w| w == a.sign_pub));
     }
 }
