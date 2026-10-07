@@ -3,6 +3,7 @@
 //! This crate must not depend on mDNS, GTK, or JNI.
 
 pub mod connection;
+pub mod pairing;
 pub mod supervisor;
 pub mod tls;
 

@@ -539,6 +539,18 @@ impl Link {
         self.conn.close(VarInt::from_u32(CLOSE_NORMAL), b"bye");
     }
 
+    /// Finishes our send side and waits (bounded) until the peer has acknowledged everything
+    /// written, then closes. Use instead of `close` when the last message must arrive.
+    pub async fn close_graceful(&self, wait: Duration) {
+        {
+            let mut stream = self.send.lock().await;
+            if stream.finish().is_ok() {
+                let _ = tokio::time::timeout(wait, stream.stopped()).await;
+            }
+        }
+        self.close();
+    }
+
     /// Test hook: write a raw frame to the stream, bypassing the AEAD layer.
     #[doc(hidden)]
     pub async fn send_raw_for_test(&self, bytes: &[u8]) -> Result<(), LinkError> {

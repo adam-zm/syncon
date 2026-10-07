@@ -8,6 +8,7 @@ name = "syncon-linkd"
 path = "src/main.rs"
 
 [dependencies]
+tempfile = "3"
 syncon-session = { path = "../../crates/syncon-session" }
 syncon-discovery = { path = "../../crates/syncon-discovery" }
 syncon-crypto = { path = "../../crates/syncon-crypto" }

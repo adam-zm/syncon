@@ -62,6 +62,8 @@ display = zero-padded 8 digits, grouped "XXXX XXXX"
 
 `lower` / `higher` compare the 32-byte keys as unsigned big-endian so both sides order them the same way. The exporter binds the SAS to this TLS session, so a passive viewer of the QR cannot print a matching code for a different handshake.
 
+Each side sends `pair_confirm` (control class, inner AEAD) when its human accepts the SAS, or `pair_reject` otherwise. A side persists the pin only after it has both confirmed locally and received `pair_confirm`. While pairing, any class other than control, or any control opcode other than `pair_confirm`/`pair_reject`, aborts the pairing.
+
 Cancel, timeout, or a SAS mismatch wipes the provisional peer. No half-paired state on disk.
 
 ## Session crypto
@@ -172,6 +174,8 @@ u16 opcode
 | 3 | `ack` | `u8 class`, `u64 seq` | M0 |
 | 4 | `unpair` | empty. Receiver deletes the pin and closes | M1 |
 | 5 | `features` | `u32` bits currently granted by the human | M2 |
+| 6 | `pair_confirm` | empty. Sent once, only while pairing, after the human confirmed the SAS | M0 |
+| 7 | `pair_reject` | empty. Sent once, only while pairing, on cancel or SAS mismatch | M0 |
 
 `ping`/`pong` is allowed as a diagnostic. The latency heartbeat is class `presence`, not a control ping, so a stuck control parser cannot hide a live peer. Presence body:
 
