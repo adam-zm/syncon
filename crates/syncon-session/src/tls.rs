@@ -3,7 +3,7 @@
 //! A certificate is accepted only when its subject public key is an Ed25519 key
 //! that the supplied [`Trust`] allows.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerifier};
 use rustls::crypto::{ring as ring_provider, CryptoProvider};
@@ -32,6 +32,17 @@ impl Trust {
     /// Accepts keys for which the predicate returns true.
     pub fn from_fn(f: impl Fn(&[u8; 32]) -> bool + Send + Sync + 'static) -> Self {
         Self(Arc::new(f))
+    }
+
+    /// Updatable policy. Pairing starts as [`Trust::any`]; after SAS confirm, store
+    /// [`Trust::only`] so a later handshake cannot present a different key.
+    pub fn cell(initial: Self) -> (Self, Arc<Mutex<Self>>) {
+        let slot = Arc::new(Mutex::new(initial));
+        let reader = slot.clone();
+        (
+            Self(Arc::new(move |k| reader.lock().unwrap().allows(k))),
+            slot,
+        )
     }
 
     fn allows(&self, key: &[u8; 32]) -> bool {

@@ -15,7 +15,9 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{Connection, Endpoint, RecvStream, SendStream, VarInt};
 use syncon_crypto::{compute_sas, x25519_shared, Identity, InnerAeadKey, PublicIdentity, SasCode};
 use syncon_proto::hello::HELLO_SIZE;
-use syncon_proto::{Class, Envelope, FeatureBits, Flags, Header, Hello, Role, HEADER_SIZE, VERSION};
+use syncon_proto::{
+    Class, Envelope, FeatureBits, Flags, Header, Hello, Role, HEADER_SIZE, VERSION,
+};
 use thiserror::Error;
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
@@ -87,7 +89,9 @@ fn transport_err(e: impl std::fmt::Display) -> LinkError {
 fn quinn_transport(cfg: &TransportConfig, datagrams: bool) -> Arc<quinn::TransportConfig> {
     let mut t = quinn::TransportConfig::default();
     t.keep_alive_interval(Some(cfg.keep_alive));
-    t.max_idle_timeout(Some(cfg.idle_timeout.try_into().expect("idle timeout fits")));
+    t.max_idle_timeout(Some(
+        cfg.idle_timeout.try_into().expect("idle timeout fits"),
+    ));
     if datagrams {
         t.datagram_receive_buffer_size(Some(256 * 1024));
     } else {
@@ -122,7 +126,12 @@ impl Transport {
     pub fn bind(identity: Arc<Identity>, cfg: TransportConfig) -> Result<Self, LinkError> {
         let realtime = server_endpoint(&identity, &cfg, cfg.realtime_addr, true)?;
         let bulk = server_endpoint(&identity, &cfg, cfg.bulk_addr, false)?;
-        Ok(Self { identity, cfg, realtime, bulk })
+        Ok(Self {
+            identity,
+            cfg,
+            realtime,
+            bulk,
+        })
     }
 
     pub fn identity(&self) -> &Identity {
@@ -154,20 +163,30 @@ impl Transport {
         })
         .await
         .map_err(|_| LinkError::Handshake("timeout".into()))??;
-        self.establish(conn, false).await
+        self.establish_timeout(conn, false, HELLO_TIMEOUT).await
     }
 
     /// Dials the realtime port of a peer. `trust` constrains the key the peer may present.
     pub async fn dial(&self, addr: SocketAddr, trust: Trust) -> Result<Link, LinkError> {
+        self.dial_timeout(addr, trust, HELLO_TIMEOUT).await
+    }
+
+    /// Like [`dial`], with an explicit handshake timeout (reconnect uses a short one).
+    pub async fn dial_timeout(
+        &self,
+        addr: SocketAddr,
+        trust: Trust,
+        timeout: Duration,
+    ) -> Result<Link, LinkError> {
         let conn = self
             .realtime
             .connect_with(self.client(trust, true)?, addr, TLS_NAME)
             .map_err(transport_err)?;
-        let conn = tokio::time::timeout(HELLO_TIMEOUT, conn)
+        let conn = tokio::time::timeout(timeout, conn)
             .await
             .map_err(|_| LinkError::Handshake("timeout".into()))?
             .map_err(transport_err)?;
-        self.establish(conn, true).await
+        self.establish_timeout(conn, true, timeout).await
     }
 
     /// Accepts the bulk connection of an already authenticated peer; others are refused.
@@ -183,10 +202,18 @@ impl Transport {
     }
 
     /// Dials the bulk port of an authenticated peer.
-    pub async fn dial_bulk(&self, addr: SocketAddr, peer_sign_pub: [u8; 32]) -> Result<BulkLink, LinkError> {
+    pub async fn dial_bulk(
+        &self,
+        addr: SocketAddr,
+        peer_sign_pub: [u8; 32],
+    ) -> Result<BulkLink, LinkError> {
         let conn = self
             .bulk
-            .connect_with(self.client(Trust::only(peer_sign_pub), false)?, addr, TLS_NAME)
+            .connect_with(
+                self.client(Trust::only(peer_sign_pub), false)?,
+                addr,
+                TLS_NAME,
+            )
             .map_err(transport_err)?;
         let conn = tokio::time::timeout(HELLO_TIMEOUT, conn)
             .await
@@ -195,8 +222,13 @@ impl Transport {
         Ok(BulkLink { conn })
     }
 
-    async fn establish(&self, conn: Connection, initiator: bool) -> Result<Link, LinkError> {
-        match tokio::time::timeout(HELLO_TIMEOUT, self.hello_exchange(&conn, initiator)).await {
+    async fn establish_timeout(
+        &self,
+        conn: Connection,
+        initiator: bool,
+        timeout: Duration,
+    ) -> Result<Link, LinkError> {
+        match tokio::time::timeout(timeout, self.hello_exchange(&conn, initiator)).await {
             Ok(Ok(link)) => Ok(link),
             Ok(Err(e)) => {
                 conn.close(VarInt::from_u32(CLOSE_PROTOCOL), b"handshake failed");
@@ -211,7 +243,8 @@ impl Transport {
 
     async fn hello_exchange(&self, conn: &Connection, initiator: bool) -> Result<Link, LinkError> {
         let id = &self.identity;
-        let tls_peer = peer_key(conn).ok_or_else(|| LinkError::Handshake("no peer certificate".into()))?;
+        let tls_peer =
+            peer_key(conn).ok_or_else(|| LinkError::Handshake("no peer certificate".into()))?;
 
         let eph = x25519_dalek::EphemeralSecret::random_from_rng(rand::rngs::OsRng);
         let eph_pub = x25519_dalek::PublicKey::from(&eph).to_bytes();
@@ -233,22 +266,32 @@ impl Transport {
 
         let (send, recv, peer_bytes) = if initiator {
             let (mut s, mut r) = conn.open_bi().await.map_err(transport_err)?;
-            s.write_all(&hello_env.to_bytes()).await.map_err(transport_err)?;
+            s.write_all(&hello_env.to_bytes())
+                .await
+                .map_err(transport_err)?;
             let p = read_hello(&mut r).await?;
             (s, r, p)
         } else {
             let (mut s, mut r) = conn.accept_bi().await.map_err(transport_err)?;
             let p = read_hello(&mut r).await?;
-            s.write_all(&hello_env.to_bytes()).await.map_err(transport_err)?;
+            s.write_all(&hello_env.to_bytes())
+                .await
+                .map_err(transport_err)?;
             (s, r, p)
         };
 
-        let peer = Hello::from_bytes(&peer_bytes).ok_or_else(|| LinkError::Handshake("bad hello".into()))?;
+        let peer = Hello::from_bytes(&peer_bytes)
+            .ok_or_else(|| LinkError::Handshake("bad hello".into()))?;
         if peer.version != VERSION {
-            return Err(LinkError::Handshake(format!("unsupported version {}", peer.version)));
+            return Err(LinkError::Handshake(format!(
+                "unsupported version {}",
+                peer.version
+            )));
         }
         if peer.sign_pub != tls_peer {
-            return Err(LinkError::Handshake("Hello key does not match certificate".into()));
+            return Err(LinkError::Handshake(
+                "Hello key does not match certificate".into(),
+            ));
         }
         if peer.fingerprint != syncon_crypto::compute_fingerprint(&peer.sign_pub) {
             return Err(LinkError::Handshake("Hello fingerprint mismatch".into()));
@@ -275,7 +318,13 @@ impl Transport {
             &id.sign_pub,
             &peer.sign_pub,
         ));
-        let sas = compute_sas(&id.sign_pub, &peer.sign_pub, &id.dh_pub, &peer.dh_pub, &sas_exporter);
+        let sas = compute_sas(
+            &id.sign_pub,
+            &peer.sign_pub,
+            &id.dh_pub,
+            &peer.dh_pub,
+            &sas_exporter,
+        );
 
         // The Hello was the only plaintext frame; everything after is AEAD.
         let (tx, rx) = mpsc::channel(1024);
@@ -283,8 +332,19 @@ impl Transport {
             fatal: Mutex::new(None),
             unknown_class: AtomicU64::new(0),
         });
-        tokio::spawn(stream_reader(recv, aead.clone(), tx.clone(), conn.clone(), shared.clone()));
-        tokio::spawn(datagram_reader(aead.clone(), tx, conn.clone(), shared.clone()));
+        tokio::spawn(stream_reader(
+            recv,
+            aead.clone(),
+            tx.clone(),
+            conn.clone(),
+            shared.clone(),
+        ));
+        tokio::spawn(datagram_reader(
+            aead.clone(),
+            tx,
+            conn.clone(),
+            shared.clone(),
+        ));
 
         Ok(Link {
             conn: conn.clone(),
@@ -302,7 +362,9 @@ impl Transport {
 
 fn peer_key(conn: &Connection) -> Option<[u8; 32]> {
     let identity = conn.peer_identity()?;
-    let certs = identity.downcast::<Vec<rustls_pki_types::CertificateDer<'static>>>().ok()?;
+    let certs = identity
+        .downcast::<Vec<rustls_pki_types::CertificateDer<'static>>>()
+        .ok()?;
     tls::cert_sign_pub(certs.first()?)
 }
 
@@ -403,7 +465,12 @@ async fn stream_reader(
         let Some(body) = aead.decrypt(class.as_u8(), header.seq, &body) else {
             return shared.fail(&conn, LinkError::Aead);
         };
-        let msg = Message { class, flags: header.flags, seq: header.seq, body };
+        let msg = Message {
+            class,
+            flags: header.flags,
+            seq: header.seq,
+            body,
+        };
         if tx.send(msg).await.is_err() {
             return;
         }
@@ -434,7 +501,12 @@ async fn datagram_reader(
             continue;
         }
         last = env.header.seq;
-        let msg = Message { class: Class::Input, flags: env.header.flags, seq: env.header.seq, body };
+        let msg = Message {
+            class: Class::Input,
+            flags: env.header.flags,
+            seq: env.header.seq,
+            body,
+        };
         if tx.send(msg).await.is_err() {
             return;
         }
@@ -485,7 +557,13 @@ impl Link {
         self.seqs[class.as_u8() as usize].fetch_add(1, Ordering::SeqCst) + 1
     }
 
-    fn seal(&self, class: Class, flags: Flags, seq: u64, plaintext: &[u8]) -> Result<Envelope, LinkError> {
+    fn seal(
+        &self,
+        class: Class,
+        flags: Flags,
+        seq: u64,
+        plaintext: &[u8],
+    ) -> Result<Envelope, LinkError> {
         let body = self.aead.encrypt(class.as_u8(), seq, plaintext);
         Envelope::new(Header::new(class, flags, seq, body.len() as u32), body)
             .map_err(|e| LinkError::Protocol(format!("{e:?}")))
@@ -493,14 +571,24 @@ impl Link {
 
     /// Sends a message of a reliable class on the realtime stream.
     /// The ciphertext (plaintext + 16 byte tag) must fit the class limit.
-    pub async fn send(&self, class: Class, flags: Flags, plaintext: &[u8]) -> Result<(), LinkError> {
+    pub async fn send(
+        &self,
+        class: Class,
+        flags: Flags,
+        plaintext: &[u8],
+    ) -> Result<(), LinkError> {
         if !class.is_reliable() || class == Class::Hello {
-            return Err(LinkError::Protocol(format!("{class:?} is not a stream class")));
+            return Err(LinkError::Protocol(format!(
+                "{class:?} is not a stream class"
+            )));
         }
         let mut stream = self.send.lock().await;
         let seq = self.next_seq(class);
         let env = self.seal(class, flags, seq, plaintext)?;
-        stream.write_all(&env.to_bytes()).await.map_err(transport_err)
+        stream
+            .write_all(&env.to_bytes())
+            .await
+            .map_err(transport_err)
     }
 
     /// Sends an `input` datagram (no retransmission, latest seq wins).
@@ -521,7 +609,12 @@ impl Link {
     }
 
     fn down_reason(&self) -> LinkError {
-        self.shared.fatal.lock().unwrap().clone().unwrap_or(LinkError::Closed)
+        self.shared
+            .fatal
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or(LinkError::Closed)
     }
 
     /// Resolves when the connection is gone.
@@ -539,10 +632,27 @@ impl Link {
         self.conn.close(VarInt::from_u32(CLOSE_NORMAL), b"bye");
     }
 
+    /// Finishes our send side and waits (bounded) until the peer has acknowledged everything
+    /// written, then closes. Use instead of `close` when the last message must arrive.
+    pub async fn close_graceful(&self, wait: Duration) {
+        {
+            let mut stream = self.send.lock().await;
+            if stream.finish().is_ok() {
+                let _ = tokio::time::timeout(wait, stream.stopped()).await;
+            }
+        }
+        self.close();
+    }
+
     /// Test hook: write a raw frame to the stream, bypassing the AEAD layer.
     #[doc(hidden)]
     pub async fn send_raw_for_test(&self, bytes: &[u8]) -> Result<(), LinkError> {
-        self.send.lock().await.write_all(bytes).await.map_err(transport_err)
+        self.send
+            .lock()
+            .await
+            .write_all(bytes)
+            .await
+            .map_err(transport_err)
     }
 }
 
@@ -563,5 +673,33 @@ impl BulkLink {
     pub fn close(&self) {
         self.conn.close(VarInt::from_u32(CLOSE_NORMAL), b"bye");
     }
-}
 
+    /// Streams `bytes` zeros. Does not buffer the whole payload.
+    pub async fn send_zeros(&self, mut bytes: usize) -> Result<(), LinkError> {
+        let mut s = self.open_send().await?;
+        let chunk = [0u8; 64 * 1024];
+        while bytes > 0 {
+            let n = bytes.min(chunk.len());
+            s.write_all(&chunk[..n]).await.map_err(transport_err)?;
+            bytes -= n;
+        }
+        s.finish().map_err(transport_err)?;
+        let _ = s.stopped().await;
+        Ok(())
+    }
+
+    /// Reads and discards `bytes` from an inbound stream.
+    pub async fn recv_zeros(&self, bytes: usize) -> Result<(), LinkError> {
+        let mut r = self.accept_recv().await?;
+        let mut got = 0usize;
+        let mut buf = vec![0u8; 64 * 1024];
+        while got < bytes {
+            match r.read(&mut buf).await {
+                Ok(Some(n)) => got += n,
+                Ok(None) => return Err(LinkError::Closed),
+                Err(e) => return Err(transport_err(e)),
+            }
+        }
+        Ok(())
+    }
+}

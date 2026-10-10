@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 syncon-proto = { path = "../syncon-proto" }
 syncon-crypto = { path = "../syncon-crypto" }
-syncon-discovery = { path = "../syncon-discovery" }
 tokio = { version = "1", features = ["full"] }
 rand = "0.8"
 quinn = { version = "0.11", default-features = false, features = ["runtime-tokio", "rustls-ring"] }
@@ -15,3 +14,4 @@ rustls-pki-types = "1"
 x509-parser = "0.16"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 thiserror = "1"
+data-encoding = "2"

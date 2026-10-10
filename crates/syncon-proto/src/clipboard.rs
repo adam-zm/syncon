@@ -111,8 +111,7 @@ impl Clipboard {
         }
 
         let generation = u64::from_le_bytes([
-            data[0], data[1], data[2], data[3],
-            data[4], data[5], data[6], data[7],
+            data[0], data[1], data[2], data[3], data[4], data[5], data[6], data[7],
         ]);
 
         let kind = ClipboardKind::from_u8(data[8]);
@@ -138,6 +137,11 @@ impl Clipboard {
     /// Returns `true` if the clipboard content is sensitive.
     pub fn is_sensitive(&self) -> bool {
         self.sensitive
+    }
+
+    /// Latest-wins apply: strictly greater generation, and never a sensitive clip.
+    pub fn should_apply(&self, last_applied: u64) -> bool {
+        !self.is_sensitive() && self.generation > last_applied
     }
 
     /// Returns the text as a UTF-8 string (if valid).
@@ -179,11 +183,11 @@ mod tests {
 
     #[test]
     fn test_clipboard_generation_ignored_if_lower() {
-        // This test is a placeholder for the M0 requirement:
-        // "Receiver applies only when `generation` is strictly greater than the last applied generation."
-        // The actual logic will live in the session crate, but we can test the struct here.
-        let old = Clipboard::new(10, b"old".to_vec());
-        let new = Clipboard::new(5, b"new but older".to_vec());
-        assert!(new.generation < old.generation);
+        let applied = Clipboard::new(10, b"old".to_vec());
+        assert!(applied.should_apply(0));
+        assert!(!Clipboard::new(10, b"same".to_vec()).should_apply(applied.generation));
+        assert!(!Clipboard::new(5, b"older".to_vec()).should_apply(applied.generation));
+        assert!(Clipboard::new(11, b"newer".to_vec()).should_apply(applied.generation));
+        assert!(!Clipboard::new_sensitive(12, b"secret".to_vec()).should_apply(applied.generation));
     }
 }

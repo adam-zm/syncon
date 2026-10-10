@@ -61,7 +61,7 @@ impl FeatureBits {
     pub const BLOB_TRANSFER: u32 = 1 << 3;
     /// Bit 4: Handoff (not M0).
     pub const HANDOFF: u32 = 1 << 4;
-    /// Bit 5: Input datagrams (not M0).
+    /// Bit 5: Input datagrams (`linkd --bench-echo` in M0).
     pub const INPUT_DATAGRAMS: u32 = 1 << 5;
 
     /// Creates a new `FeatureBits` from a `u32`.

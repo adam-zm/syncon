@@ -3,6 +3,8 @@
 //! This crate must not depend on mDNS, GTK, or JNI.
 
 pub mod connection;
+pub mod established;
+pub mod pairing;
 pub mod supervisor;
 pub mod tls;
 
@@ -10,8 +12,13 @@ pub mod tls;
 pub use connection::{
     BulkLink, Link, LinkError, Message, Transport, TransportConfig, BULK_PORT, REALTIME_PORT,
 };
-pub use tls::Trust;
+pub use established::{
+    echo_p95_budget, BenchConfig, EchoHistogram, HeartbeatConfig, LiveConfig, LiveEvent,
+    LiveOutcome, LiveState,
+};
+pub use pairing::{PairError, PairPayload};
 pub use supervisor::{
-    BackoffConfig, PeerSession, Supervisor, SupervisorCommand, SupervisorConfig, SupervisorEvent,
+    connect_pinned, maintain, Backoff, BackoffConfig, CacheSource, MaintainConfig, SessionEvent,
     SupervisorState,
 };
+pub use tls::Trust;

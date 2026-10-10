@@ -24,6 +24,10 @@ pub enum ControlOpcode {
     Unpair = 4,
     /// Features: `u32` bits currently granted by the human.
     Features = 5,
+    /// PairConfirm: empty payload. The human on the sender confirmed the SAS.
+    PairConfirm = 6,
+    /// PairReject: empty payload. The sender cancelled or saw a SAS mismatch.
+    PairReject = 7,
 }
 
 impl ControlOpcode {
@@ -40,6 +44,8 @@ impl ControlOpcode {
             3 => Some(ControlOpcode::Ack),
             4 => Some(ControlOpcode::Unpair),
             5 => Some(ControlOpcode::Features),
+            6 => Some(ControlOpcode::PairConfirm),
+            7 => Some(ControlOpcode::PairReject),
             _ => None,
         }
     }
@@ -58,6 +64,10 @@ pub enum Control {
     Unpair,
     /// Features granted by the human.
     Features(u32),
+    /// SAS confirmed by the sender's human (pairing only).
+    PairConfirm,
+    /// SAS rejected or pairing cancelled by the sender (pairing only).
+    PairReject,
 }
 
 impl Control {
@@ -86,6 +96,12 @@ impl Control {
                 bytes.extend_from_slice(&ControlOpcode::Features.as_u16().to_le_bytes());
                 bytes.extend_from_slice(&bits.to_le_bytes());
             }
+            Control::PairConfirm => {
+                bytes.extend_from_slice(&ControlOpcode::PairConfirm.as_u16().to_le_bytes());
+            }
+            Control::PairReject => {
+                bytes.extend_from_slice(&ControlOpcode::PairReject.as_u16().to_le_bytes());
+            }
         }
 
         bytes
@@ -106,8 +122,7 @@ impl Control {
                     return None;
                 }
                 let ts = u64::from_le_bytes([
-                    data[2], data[3], data[4], data[5],
-                    data[6], data[7], data[8], data[9],
+                    data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
                 ]);
                 Some(Control::Ping(ts))
             }
@@ -116,8 +131,7 @@ impl Control {
                     return None;
                 }
                 let ts = u64::from_le_bytes([
-                    data[2], data[3], data[4], data[5],
-                    data[6], data[7], data[8], data[9],
+                    data[2], data[3], data[4], data[5], data[6], data[7], data[8], data[9],
                 ]);
                 Some(Control::Pong(ts))
             }
@@ -127,8 +141,7 @@ impl Control {
                 }
                 let class = Class::from_u8(data[2])?;
                 let seq = u64::from_le_bytes([
-                    data[3], data[4], data[5], data[6],
-                    data[7], data[8], data[9], data[10],
+                    data[3], data[4], data[5], data[6], data[7], data[8], data[9], data[10],
                 ]);
                 Some(Control::Ack { class, seq })
             }
@@ -145,6 +158,8 @@ impl Control {
                 let bits = u32::from_le_bytes([data[2], data[3], data[4], data[5]]);
                 Some(Control::Features(bits))
             }
+            ControlOpcode::PairConfirm => Some(Control::PairConfirm),
+            ControlOpcode::PairReject => Some(Control::PairReject),
         }
     }
 }
@@ -178,7 +193,13 @@ mod tests {
         };
         let bytes = control.to_bytes();
         let parsed = Control::from_bytes(&bytes).unwrap();
-        assert!(matches!(parsed, Control::Ack { class: Class::Clipboard, seq: 42 }));
+        assert!(matches!(
+            parsed,
+            Control::Ack {
+                class: Class::Clipboard,
+                seq: 42
+            }
+        ));
     }
 
     #[test]
@@ -195,6 +216,13 @@ mod tests {
         let bytes = control.to_bytes();
         let parsed = Control::from_bytes(&bytes).unwrap();
         assert!(matches!(parsed, Control::Features(0b101)));
+    }
+
+    #[test]
+    fn test_control_pair_roundtrip() {
+        for c in [Control::PairConfirm, Control::PairReject] {
+            assert_eq!(Control::from_bytes(&c.to_bytes()), Some(c));
+        }
     }
 
     #[test]
